@@ -6,7 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 @dataclass
-class GPTParameter():
+class GPTConfig():
     block_size: int = 8
     vocab_size: int = 50257
     num_layer: int = 12
@@ -35,16 +35,18 @@ class CausalSelfAttention(nn.Module):
     """
     def __init__(self, config):
         super().__init__()
+        assert config.num_embd % config.num_head == 0
         # input head k,v,q parameters all batched into one layer
         self.c_attn = nn.Linear(config.num_embd, 3 * config.num_embd, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(3 * config.num_embd, config.num_embd, bias=config.bias)
+        self.c_proj = nn.Linear(config.num_embd, config.num_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.num_head
-        self.n_embd = config.num_embd
-        self.flash = hasattr(self, 'scaled_dot_product_attention')
+        self.num_head = config.num_head
+        self.num_embd = config.num_embd
+        self.dropout = config.dropout
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("Using slow attention. Flash attention requires PyTorch >= 2.0")
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
@@ -53,15 +55,15 @@ class CausalSelfAttention(nn.Module):
         # batch, time (sequence length or context window), channel (embedding size or num_embd)
         B, T, C = x.shape
         query, key, value = self.c_attn(x).chunk(3, dim=-1)         # TODO: check if this is correct
-        query = query.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, num_Head, T, Head_size)
-        key = key.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)      # (B, num_Head, T, Head_size)
-        value = value.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, num_Head, T, Head_size)
+        query = query.view(B, T, self.num_head, C // self.num_head).transpose(1, 2)  # (B, num_Head, T, Head_size)
+        key = key.view(B, T, self.num_head, C // self.num_head).transpose(1, 2)      # (B, num_Head, T, Head_size)
+        value = value.view(B, T, self.num_head, C // self.num_head).transpose(1, 2)  # (B, num_Head, T, Head_size)
         
         if self.flash:
             # use fast attention, requires PyTorch >= 2.0
             # no custom attn_mask is used on top of the standard causal mask
             # causal implies that the attention is applied to the past and not the future
-            w = F.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout=self.dropout if self.training else 0, is_causal=True)
+            y = F.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             attn = query @ key.transpose(-2, -1) * (1 / math.sqrt(key.size(-1))) 
             attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
@@ -117,13 +119,13 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None, "config.vocab_size must be specified and > 0"
         assert config.block_size is not None, "config.block_size must be specified and > 0"
-
-        self.transformer = nn.Sequential(dict(
+        self.config = config
+        self.transformer = nn.ModuleDict(dict(
             token_emb = nn.Embedding(config.vocab_size, config.num_embd),
             position_emb = nn.Embedding(config.block_size, config.num_embd),
             drop = nn.Dropout(config.dropout),
-            head = nn.Sequential([Block(config) for _ in range(config.num_layer)]), # TODO: check if this is correct
-            layer_norm = LayerNormalization(config.num_embd, config.bias)
+            head = nn.ModuleList([Block(config) for _ in range(config.num_layer)]), 
+            layer_norm = LayerNormalization(config.num_embd, config.bias),
         ))
         self.layer_softmax = nn.Linear(config.num_embd, config.vocab_size, bias=False)
         # tie weight of decoder and embedding layer, share weights.
@@ -137,7 +139,7 @@ class GPT(nn.Module):
             if pn.endswith('c_proj.weight'):
                 nn.init.normal_(p, mean=0, std=0.02/math.sqrt(2 * config.num_layer))
         
-        print(f"number of parameters: {sum(p.numel() for p in self.parameters())}")
+        print(f"number of parameters: {sum(p.numel() for p in self.parameters())/1e6} M parameters")
         
     def get_num_params(self, non_embedding=True):
         """
@@ -166,8 +168,8 @@ class GPT(nn.Module):
         t_e = self.transformer.token_emb(idx)
         p_e = self.transformer.position_emb(torch.arange(t, device=device))
         x = self.transformer.drop(t_e + p_e)
-        # TODO: check correct if Sequential is used
-        x = self.transformer.head(x)
+        for block in self.transformer.head:
+                    x = block(x)
         x = self.transformer.layer_norm(x)
         
         if targets is not None:
