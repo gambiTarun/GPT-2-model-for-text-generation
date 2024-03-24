@@ -85,7 +85,7 @@ class Trainer:
             torch.cuda.set_device(self.device)
             self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
             # after loading the snapshot, we will wrap the model with DDP
-            self.model = DDP(self.model, device_ids=[self.ddp_local_rank]).module
+            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
             
         self.dataset = dataset
         self.optimizer = optimizer
@@ -99,7 +99,7 @@ class Trainer:
     
     def _save_snapshot(self, epoch):
         snapshot = {
-            'model': self.model.state_dict(),
+            'model': self.model.state_dict() if not ddp else self.model.module.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epochs_run': epoch,
             # 'model_args': model_args,
