@@ -5,6 +5,9 @@ GPUs with distributed data parallel (ddp).
 To run on single GPU/CPU:
 $ python train.py 
 
+To run on multiple GPUs on a single node/machine:
+$ torchrun --standalone --nproc_per_node=gpu train.py
+
 """
 from tqdm import tqdm
 import torch
@@ -77,6 +80,7 @@ class Trainer:
             self.ddp_rank = int(os.environ['RANK'])
             self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
             self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+            print(f"ddp_rank: {self.ddp_rank}, ddp_local_rank: {self.ddp_local_rank}, ddp_world_size: {self.ddp_world_size}")
             self.device = f'cuda:{self.ddp_local_rank}'
             torch.cuda.set_device(self.device)
             self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
