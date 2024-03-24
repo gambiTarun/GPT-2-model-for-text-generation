@@ -3,7 +3,7 @@ import torch
 from src.model import GPT, GPTConfig
 from train import MyTrainDataset, num_embd, num_head, num_layer, block_size, bias, dropout
 
-max_num_tokens = 2048
+max_num_tokens = 10000
 _,_,decode,vocab_size = MyTrainDataset(1)
 
 gptconf = GPTConfig(
