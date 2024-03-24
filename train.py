@@ -19,7 +19,7 @@ from src.model import GPT, GPTConfig
 # -----------------------------------------------------------------
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # wandb logging
-wandb_log = True # disabled by default
+wandb_log = False # disabled by default
 wandb_project = 'shakespeare-gpt2' # 'your_project_name_here
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # system
