@@ -64,8 +64,17 @@ class Trainer:
         snapshot_path = str,
     ):
         self.master_process = True
-            
+        self.device = device
+        if ddp:
+            self.ddp_rank = int(os.environ['RANK'])
+            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
+            self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+            print(f"ddp_rank: {self.ddp_rank}, ddp_local_rank: {self.ddp_local_rank}, ddp_world_size: {self.ddp_world_size}")
+            self.device = f'cuda:{self.ddp_local_rank}'
+            torch.cuda.set_device(self.device)
+            self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
         self.model = model.to(device)
+        
         if compile:
             print("compiling the model... (takes a ~minute)")
             self.unoptimized_model = self.model
@@ -77,16 +86,10 @@ class Trainer:
             self._load_snapshot()  
             
         if ddp:
-            self.ddp_rank = int(os.environ['RANK'])
-            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
-            self.ddp_world_size = int(os.environ['WORLD_SIZE'])
-            print(f"ddp_rank: {self.ddp_rank}, ddp_local_rank: {self.ddp_local_rank}, ddp_world_size: {self.ddp_world_size}")
-            self.device = f'cuda:{self.ddp_local_rank}'
-            torch.cuda.set_device(self.device)
-            self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
             # after loading the snapshot, we will wrap the model with DDP
             self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
             
+        self.model = self.model.to(self.device)
         self.dataset = dataset
         self.optimizer = optimizer
         self.epochs_run = 0
