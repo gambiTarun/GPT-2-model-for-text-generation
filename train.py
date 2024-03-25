@@ -204,7 +204,7 @@ class Trainer:
     def train(self, max_epochs: int):
         t0 = time.time()     
         xb, yb = self.sample_batch('train') # fetch the very first batch
-        for epoch in tqdm(range(self.epochs_run, max_epochs), desc="Training Progress"):
+        for epoch in tqdm(range(self.epochs_run, max_epochs), desc=f"[GPU:{self.gpu_id}] Training Progress"):
             
             if epoch % save_every == 0 and self.master_process:       
                 self._save_snapshot(epoch)
