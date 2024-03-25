@@ -37,7 +37,7 @@ compile = False # use PyTorch 2.0 to compile the model to be faster
 block_size = 1024
 # data
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 64 # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 256
 # model
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
