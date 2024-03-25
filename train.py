@@ -134,7 +134,8 @@ class Trainer:
             
     def _run_epoch(self, epoch):
         xb, yb = self.sample_batch('train')
-        print(f"[GPU{self.gpu_id}] Epoch {epoch} | Input size {xb.shape} | Output size {yb.shape}")
+        if log_interval>0:
+            print(f"[GPU:{self.gpu_id}] Epoch {epoch} | Input size {xb.shape} | Output size {yb.shape}")
         return self._run_batch(xb, yb)
             
     # for checking the loss on the entire dataset, set model to eval and then to train before returning
