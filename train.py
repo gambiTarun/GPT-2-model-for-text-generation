@@ -64,16 +64,16 @@ class Trainer:
         snapshot_path = str,
     ):
         self.master_process = True
+        self.gpu_id = 0
         self.device = device
         if ddp:
             self.ddp_rank = int(os.environ['RANK'])
-            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
+            self.gpu_id = int(os.environ['LOCAL_RANK'])
             self.ddp_world_size = int(os.environ['WORLD_SIZE'])
-            print(f"ddp_rank: {self.ddp_rank}, ddp_local_rank: {self.ddp_local_rank}, ddp_world_size: {self.ddp_world_size}")
-            self.device = f'cuda:{self.ddp_local_rank}'
+            self.device = f'cuda:{self.gpu_id}'
             torch.cuda.set_device(self.device)
             self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
-        self.model = model.to(device)
+        self.model = model.to(self.gpu_id)
         
         if compile:
             print("compiling the model... (takes a ~minute)")
@@ -87,7 +87,7 @@ class Trainer:
             
         if ddp:
             # after loading the snapshot, we will wrap the model with DDP
-            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
+            self.model = DDP(self.model, device_ids=[self.gpu_id])
             
         self.model = self.model.to(self.device)
         self.dataset = dataset
@@ -112,8 +112,8 @@ class Trainer:
         torch.save(snapshot, self.snapshot_path)
         
     def _load_snapshot(self):
-        loc = f"cuda:{self.ddp_local_rank}" if 'cuda' in device_type else device_type
-        snapshot = torch.load(self.snapshot_path, map_location=loc)
+        device_loc = f"cuda:{self.gpu_id}" if 'cuda' in device_type else device_type
+        snapshot = torch.load(self.snapshot_path, map_location=device_loc)
         self.model.load_state_dict(snapshot["model"])
         self.epochs_run = snapshot["epochs_run"]
         print(f"resuming training from path {self.snapshot_path} at epoch: {self.epochs_run}")
@@ -123,7 +123,7 @@ class Trainer:
         ix = torch.randint(0, len(data) - block_size, (batch_size,))
         x = torch.stack([data[i:i+block_size] for i in ix])
         y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-        return x.to(device), y.to(device)
+        return x.to(self.device), y.to(self.device)
         
     def _run_batch(self, X, Y):
         self.optimizer.zero_grad()
@@ -134,6 +134,7 @@ class Trainer:
             
     def _run_epoch(self, epoch):
         xb, yb = self.sample_batch('train')
+        print(f"[GPU{self.gpu_id}] Epoch {epoch} | Input size {xb.shape} | Output size {yb.shape}")
         return self._run_batch(xb, yb)
             
     # for checking the loss on the entire dataset, set model to eval and then to train before returning
