@@ -195,7 +195,7 @@ class Trainer:
             for k in range(eval_iters):
                 X, Y = self.sample_batch(split)
                 with ctx:
-                    logits, loss = model(X, Y)
+                    _, loss = model(X, Y)
                 losses[k] = loss.item()
             out[split] = losses.mean()
         model.train()
