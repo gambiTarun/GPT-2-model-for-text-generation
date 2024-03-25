@@ -16,6 +16,7 @@ import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
+from contextlib import nullcontext
 
 from src.model import GPT, GPTConfig
 
@@ -27,14 +28,19 @@ wandb_project = 'shakespeare-gpt2' # 'your_project_name_here
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # system
 device_type = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+# initialize a GradScaler. If enabled=False scaler is a no-op
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 device = torch.device(device_type)
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 compile = False # use PyTorch 2.0 to compile the model to be faster
 block_size = 1024
 # data
+gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 64 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 256
 # model
+grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 num_layer = 6
 num_head = 6
 num_embd = 384
@@ -51,9 +57,9 @@ init_from = 'scratch' # 'scratch' or 'resume'
 # adamw optimizer
 learning_rate = 3e-4 # max learning rate
 
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 # -----------------------------------------------------------------
-
-torch.manual_seed(42)
 
 class Trainer:
     def __init__(
@@ -65,7 +71,9 @@ class Trainer:
     ):
         self.master_process = True
         self.gpu_id = 0
-        self.device = device
+        self.device = device_type
+        self.seed_offset = 0
+        self.ddp_world_size = 1
         if ddp:
             self.ddp_rank = int(os.environ['RANK'])
             self.gpu_id = int(os.environ['LOCAL_RANK'])
@@ -73,7 +81,15 @@ class Trainer:
             self.device = f'cuda:{self.gpu_id}'
             torch.cuda.set_device(self.device)
             self.master_process = self.ddp_rank == 0 # this process will do logging, checkpointing etc.
+            self.seed_offset = self.ddp_rank # each process gets a different seed
         self.model = model.to(self.gpu_id)
+        
+        torch.manual_seed(1337 + self.seed_offset)
+        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+        
+        self.tokens_per_iter = gradient_accumulation_steps * self.ddp_world_size * batch_size * block_size
+        print(f"tokens per iteration will be: {self.tokens_per_iter:,}")
         
         if compile:
             print("compiling the model... (takes a ~minute)")
@@ -89,7 +105,6 @@ class Trainer:
             # after loading the snapshot, we will wrap the model with DDP
             self.model = DDP(self.model, device_ids=[self.gpu_id])
             
-        self.model = self.model.to(self.device)
         self.dataset = dataset
         self.optimizer = optimizer
         self.epochs_run = 0
@@ -123,20 +138,52 @@ class Trainer:
         ix = torch.randint(0, len(data) - block_size, (batch_size,))
         x = torch.stack([data[i:i+block_size] for i in ix])
         y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-        return x.to(self.device), y.to(self.device)
+        if device_type == 'cuda':
+            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+            x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(self.device, non_blocking=True)
+        else:
+            x, y = x.to(self.device), y.to(self.device)
+        return x, y
         
     def _run_batch(self, X, Y):
+        
+        
         self.optimizer.zero_grad()
         logits, loss = self.model(X, Y)
         loss.backward()
         self.optimizer.step()
         return loss.item()
             
-    def _run_epoch(self, epoch):
-        xb, yb = self.sample_batch('train')
-        if log_interval>0:
-            print(f"[GPU:{self.gpu_id}] Epoch {epoch} | Input size {xb.shape} | Output size {yb.shape}")
-        return self._run_batch(xb, yb)
+    def _run_epoch(self, epoch, xb, yb):
+        for micro_step in range(gradient_accumulation_steps):
+            if ddp:
+                # in DDP training we only need to sync gradients at the last micro step.
+                # the official way to do this is with model.no_sync() context manager, but
+                # I really dislike that this bloats the code and forces us to repeat code
+                # looking at the source of that context manager, it just toggles this variable
+                model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+            with ctx:
+                logits, loss = model(xb, yb)
+                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            xb, yb = self.sample_batch('train')
+            if log_interval>0:
+                print(f"[GPU:{self.gpu_id}] Epoch {epoch} | Input size {xb.shape} | Output size {yb.shape}")
+                
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
+            
+        # clip the gradient
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # step the optimizer and scaler if training in fp16
+        scaler.step(optimizer)
+        scaler.update()
+        # flush the gradients as soon as we can, no need for this memory anymore
+        optimizer.zero_grad(set_to_none=True)
+        
+        return loss.item()
             
     # for checking the loss on the entire dataset, set model to eval and then to train before returning
     @torch.no_grad()
@@ -147,7 +194,8 @@ class Trainer:
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
                 X, Y = self.sample_batch(split)
-                _, loss = self.model(X, Y)
+                with ctx:
+                    logits, loss = model(X, Y)
                 losses[k] = loss.item()
             out[split] = losses.mean()
         model.train()
@@ -155,6 +203,7 @@ class Trainer:
 
     def train(self, max_epochs: int):
         t0 = time.time()     
+        xb, yb = self.sample_batch('train') # fetch the very first batch
         for epoch in tqdm(range(self.epochs_run, max_epochs), desc="Training Progress"):
             
             if epoch % save_every == 0 and self.master_process:       
@@ -178,7 +227,7 @@ class Trainer:
                         self._save_snapshot(epoch)
                         print(f"training snapshot saved at {self.snapshot_path}")
                
-            lossf = self._run_epoch(epoch)
+            lossf = self._run_epoch(epoch, xb, yb)
             
             t1 = time.time()
             dt = t1 - t0
