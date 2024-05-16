@@ -1,4 +1,4 @@
-# GPT Model
+# GPT-2 Model for text generation
 
 This project includes a custom implementation of the decoder stack of GPT model using PyTorch. The model is designed for sequence generation tasks and leverages causal self-attention, layer normalization, multi-layer perceptrons (MLP), and custom configurations to achieve its objectives. The implementation allows for significant customization, including adjustments to block size, vocabulary size, layer counts, head counts, embedding dimensions, and dropout rates.
 
